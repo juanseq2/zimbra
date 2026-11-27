@@ -78,7 +78,7 @@ interface Configuracion {
   limite_prospectos_vendedor: number
 }
 
-const props = defineProps<{ apiUrl: string }>()
+const props = defineProps<{ apiUrl: string; token: string }>()
 const prospectos = ref<Prospecto[]>([])
 const vendedores = ref<Vendedor[]>([])
 const campanias = ref<Campania[]>([])
@@ -108,6 +108,7 @@ const solicitar = async <T,>(ruta: string, opciones: RequestInit = {}): Promise<
   const respuesta = await fetch(`${api}/${ruta}`, {
     ...opciones,
     headers: {
+      Authorization: `Bearer ${props.token}`,
       ...(opciones.body ? { 'Content-Type': 'application/json' } : {}),
       ...opciones.headers,
     },

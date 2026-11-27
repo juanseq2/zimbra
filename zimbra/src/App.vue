@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import ProspectosPanel from './components/ProspectosPanel.vue'
+import AuthPage from './components/AuthPage.vue'
+import AdminUsersPanel from './components/AdminUsersPanel.vue'
+
+interface UsuarioSesion {
+  id: number
+  nombre: string
+  correo: string
+  rol: string
+}
 
 interface Venta {
   id_venta: number
@@ -33,6 +42,8 @@ interface Mensaje {
 }
 
 const apiUrl = (import.meta.env.VITE_API_URL || 'http://localhost:3000/api').replace(/\/$/, '')
+const token = ref('')
+const usuario = ref<UsuarioSesion | null>(null)
 
 const ventas = ref<Venta[]>([])
 const tasaConversion = ref<Campania[]>([])
@@ -42,6 +53,18 @@ const mensaje = ref<Mensaje | null>(null)
 const cargando = ref(false)
 const propuestaEnProceso = ref<number | null>(null)
 
+const cerrarSesion = () => {
+  token.value = ''
+  usuario.value = null
+  localStorage.removeItem('zimbraSesion')
+}
+
+const iniciarSesion = (sesion: { token: string; usuario: UsuarioSesion }) => {
+  token.value = sesion.token
+  usuario.value = sesion.usuario
+  localStorage.setItem('zimbraSesion', JSON.stringify(sesion))
+}
+
 const nombresColumnasReporte: Record<string, string> = {
   vendedor: 'Vendedor',
   cantidad_ventas: 'Ventas',
@@ -49,7 +72,9 @@ const nombresColumnasReporte: Record<string, string> = {
 }
 
 const obtenerDatos = async <T,>(recurso: string): Promise<T> => {
-  const respuesta = await fetch(`${apiUrl}/${recurso}`)
+  const respuesta = await fetch(`${apiUrl}/${recurso}`, {
+    headers: { Authorization: `Bearer ${token.value}` },
+  })
   if (!respuesta.headers.get('content-type')?.includes('application/json')) {
     throw new Error(
       `La API respondió sin JSON (${respuesta.status}). Revisa la versión del servidor.`,
@@ -97,7 +122,10 @@ const cerrarVenta = async (propuesta: Propuesta) => {
   try {
     const respuesta = await fetch(`${apiUrl}/cerrar-venta`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token.value}`,
+      },
       body: JSON.stringify({
         id_propuesta: propuesta.id_propuesta,
         id_usuario: propuesta.id_usuario,
@@ -166,21 +194,54 @@ const anchoBarraConversion = (conversion: string | number) =>
     ? Math.max(0, Math.min(100, ((Number(conversion) || 0) / conversionMaxima.value) * 100))
     : 0
 
-onMounted(cargarDatos)
+onMounted(() => {
+  const guardada = localStorage.getItem('zimbraSesion')
+  if (guardada) {
+    try {
+      const sesion = JSON.parse(guardada) as { token: string; usuario: UsuarioSesion }
+      if (sesion.token && sesion.usuario) iniciarSesion(sesion)
+    } catch {
+      localStorage.removeItem('zimbraSesion')
+    }
+  }
+  if (token.value) cargarDatos()
+})
 </script>
 
 <template>
-  <main class="dashboard">
+  <AuthPage v-if="!usuario" :api-url="apiUrl" @autenticado="iniciarSesion" />
+
+  <main v-else-if="usuario.rol === 'persona_natural'" class="dashboard persona-shell">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">ZIMBRA · CUENTA PERSONAL</p>
+        <h1>Solicitud de servicio</h1>
+        <p class="page-description">Hola, {{ usuario.nombre }}. Tu solicitud fue registrada.</p>
+      </div>
+      <button class="refresh-button" type="button" @click="cerrarSesion">Cerrar sesión</button>
+    </header>
+    <section class="panel persona-status">
+      <h2>Tu cuenta está creada</h2>
+      <p>Un asesor comercial podrá revisar tu solicitud y ponerse en contacto contigo.</p>
+      <p><strong>Correo:</strong> {{ usuario.correo }}</p>
+    </section>
+  </main>
+
+  <main v-else class="dashboard">
     <header class="page-header">
       <div>
         <p class="eyebrow">ZIMBRA · VENTAS</p>
         <h1>Panel de consultas</h1>
         <p class="page-description">Resumen de propuestas, ventas y campañas.</p>
       </div>
-      <button class="refresh-button" type="button" :disabled="cargando" @click="cargarDatos()">
-        <span aria-hidden="true">{{ cargando ? '…' : '↻' }}</span>
-        {{ cargando ? 'Actualizando' : 'Actualizar' }}
-      </button>
+      <div class="header-actions">
+        <span class="session-user">{{ usuario?.nombre }} · {{ usuario?.rol }}</span>
+        <button class="refresh-button" type="button" :disabled="cargando" @click="cargarDatos()">
+          <span aria-hidden="true">{{ cargando ? '…' : '↻' }}</span>
+          {{ cargando ? 'Actualizando' : 'Actualizar' }}
+        </button>
+        <button class="logout-button" type="button" @click="cerrarSesion">Salir</button>
+      </div>
     </header>
 
     <div
@@ -198,7 +259,8 @@ onMounted(cargarDatos)
     </div>
 
     <div class="sections">
-      <ProspectosPanel :api-url="apiUrl" />
+      <AdminUsersPanel v-if="usuario?.rol === 'administrador'" :api-url="apiUrl" :token="token" />
+      <ProspectosPanel :api-url="apiUrl" :token="token" />
 
       <section class="panel">
         <div class="section-heading">
@@ -459,6 +521,31 @@ button {
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 30px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-user {
+  color: #69758b;
+  font-size: 12px;
+}
+
+.logout-button {
+  min-height: 42px;
+  border: 1px solid #dfe4ef;
+  border-radius: 9px;
+  padding: 0 14px;
+  background: #fff;
+  color: #536078;
+  cursor: pointer;
+}
+
+.persona-status {
+  padding: 24px;
 }
 
 .eyebrow {

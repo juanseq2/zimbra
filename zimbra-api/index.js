@@ -3,6 +3,8 @@ require('dotenv').config();
 const cors = require('cors');
 const express = require('express');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const port = Number(process.env.PORT || 3000);
 const frontendUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:5173').origin;
@@ -10,6 +12,10 @@ const crmWebhookUrl = process.env.CRM_WEBHOOK_URL || '';
 const crmWebhookToken = process.env.CRM_WEBHOOK_TOKEN || '';
 const puntajeMinimoAsignacion = Number(process.env.PUNTAJE_MINIMO_ASIGNACION || 50);
 const limiteProspectosVendedor = Number(process.env.LIMITE_PROSPECTOS_VENDEDOR || 30);
+const jwtSecret = process.env.JWT_SECRET || 'zimbra-desarrollo-cambiar-antes-de-produccion';
+const adminInicialEmail = (process.env.ADMIN_INITIAL_EMAIL || '').trim().toLowerCase();
+const adminInicialPassword = process.env.ADMIN_INITIAL_PASSWORD || '';
+const adminInicialNombre = (process.env.ADMIN_INITIAL_NAME || 'Administrador Zimbra').trim();
 
 const databaseConfig = {
   host: process.env.DB_HOST || 'localhost',
@@ -62,10 +68,67 @@ appMiddleware.disable('x-powered-by');
 appMiddleware.use(cors({ origin: frontendUrl }));
 appMiddleware.use(express.json({ limit: '32kb' }));
 
+const crearToken = (payload) =>
+  jwt.sign(payload, jwtSecret, { expiresIn: '8h', issuer: 'zimbra-api' });
+
+const autenticar = (req, res, next) => {
+  const encabezado = req.get('authorization') || '';
+  const token = encabezado.startsWith('Bearer ') ? encabezado.slice(7) : '';
+  if (!token) return res.status(401).json({ error: 'Debes iniciar sesión.' });
+
+  try {
+    const usuario = jwt.verify(token, jwtSecret, { issuer: 'zimbra-api' });
+    req.usuario = usuario;
+    return next();
+  } catch (_error) {
+    return res.status(401).json({ error: 'La sesión no es válida o venció.' });
+  }
+};
+
+const requerirRoles = (...roles) => (req, res, next) => {
+  if (!req.usuario || !roles.includes(req.usuario.rol)) {
+    return res.status(403).json({ error: 'No tienes permisos para realizar esta acción.' });
+  }
+  return next();
+};
+
 const reportarError = (res, contexto, error, status = 500) => {
   console.error(`${contexto}:`, error);
   res.status(status).json({ error: 'Ocurrió un error en la API. Revisa la terminal para más detalles.' });
 };
+
+const rutasPublicasApi = new Set([
+  '/health',
+  '/api/health',
+  '/auth/login',
+  '/api/auth/login',
+  '/personas-naturales/registro',
+  '/api/personas-naturales/registro',
+  '/personas-naturales/login',
+  '/api/personas-naturales/login',
+]);
+
+appMiddleware.use('/api', (req, res, next) => {
+  if (rutasPublicasApi.has(req.path)) return next();
+
+  const encabezado = req.get('authorization') || '';
+  const token = encabezado.startsWith('Bearer ') ? encabezado.slice(7) : '';
+  if (!token) return res.status(401).json({ error: 'Debes iniciar sesión.' });
+
+  try {
+    const usuario = jwt.verify(token, jwtSecret, { issuer: 'zimbra-api' });
+    if (usuario.tipo === 'persona_natural') {
+      return res.status(403).json({ error: 'El acceso de persona natural no incluye el panel administrativo.' });
+    }
+    if (!['administrador', 'vendedor', 'invitado'].includes(usuario.rol)) {
+      return res.status(403).json({ error: 'Tu rol no tiene acceso al sistema.' });
+    }
+    req.usuario = usuario;
+    return next();
+  } catch (_error) {
+    return res.status(401).json({ error: 'La sesión no es válida o venció.' });
+  }
+});
 
 const idPositivo = (valor) => Number.isSafeInteger(valor) && valor > 0;
 const uuidValido = (valor) =>
@@ -187,6 +250,237 @@ const ejecutarTransaccion = async (trabajo) => {
     connection.release();
   }
 };
+
+appMiddleware.post('/api/auth/login', async (req, res) => {
+  const correo = typeof req.body?.correo_electronico === 'string'
+    ? req.body.correo_electronico.trim().toLowerCase()
+    : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!correo || !password) {
+    return res.status(400).json({ error: 'Ingresa correo electrónico y contraseña.' });
+  }
+
+  try {
+    const [usuarios] = await pool.query(
+      `SELECT id_usuario, nombre, email, rol, activo, password_hash
+         FROM usuario_sistema
+        WHERE email = ?`,
+      [correo],
+    );
+    const usuario = usuarios[0];
+    if (!usuario || !usuario.activo || !usuario.password_hash ||
+        !(await bcrypt.compare(password, usuario.password_hash))) {
+      return res.status(401).json({ error: 'Credenciales incorrectas o usuario inactivo.' });
+    }
+
+    await pool.query('UPDATE usuario_sistema SET ultimo_acceso = NOW() WHERE id_usuario = ?', [usuario.id_usuario]);
+    const token = crearToken({
+      tipo: 'usuario_interno',
+      id: usuario.id_usuario,
+      nombre: usuario.nombre,
+      correo: usuario.email,
+      rol: usuario.rol,
+    });
+    return res.json({
+      token,
+      usuario: { id: usuario.id_usuario, nombre: usuario.nombre, correo: usuario.email, rol: usuario.rol },
+    });
+  } catch (error) {
+    return reportarError(res, 'Error al iniciar sesión', error);
+  }
+});
+
+appMiddleware.get('/api/auth/me', autenticar, (req, res) => {
+  res.json({ usuario: req.usuario });
+});
+
+appMiddleware.post('/api/personas-naturales/registro', async (req, res) => {
+  const nombre = typeof req.body?.nombre === 'string' ? req.body.nombre.trim() : '';
+  const correo = typeof req.body?.correo_electronico === 'string'
+    ? req.body.correo_electronico.trim().toLowerCase()
+    : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const telefono = typeof req.body?.telefono === 'string' ? req.body.telefono.trim() : '';
+  const tipoIdentificacion = typeof req.body?.tipo_identificacion === 'string'
+    ? req.body.tipo_identificacion.trim()
+    : '';
+  const numeroIdentificacion = typeof req.body?.numero_identificacion === 'string'
+    ? req.body.numero_identificacion.trim()
+    : '';
+  const plan = typeof req.body?.plan_servicio === 'string' ? req.body.plan_servicio.trim() : '';
+
+  if (!nombre || nombre.length > 120) {
+    return res.status(400).json({ error: 'El nombre es obligatorio y debe tener máximo 120 caracteres.' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo) || correo.length > 150) {
+    return res.status(400).json({ error: 'Ingresa un correo electrónico válido.' });
+  }
+  if (!password || password.length < 8 || password.length > 72) {
+    return res.status(400).json({ error: 'La contraseña debe tener entre 8 y 72 caracteres.' });
+  }
+  if (telefono.length > 30) {
+    return res.status(400).json({ error: 'El teléfono debe tener máximo 30 caracteres.' });
+  }
+  if (tipoIdentificacion && !['CC', 'CE', 'Pasaporte', 'Otro'].includes(tipoIdentificacion)) {
+    return res.status(400).json({ error: 'El tipo de identificación no es válido.' });
+  }
+  if (numeroIdentificacion.length > 30) {
+    return res.status(400).json({ error: 'El número de identificación debe tener máximo 30 caracteres.' });
+  }
+  if (!plan || plan.length > 80) {
+    return res.status(400).json({ error: 'Selecciona el servicio que deseas adquirir.' });
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 12);
+    const [resultado] = await pool.query(
+      `INSERT INTO cliente_persona_natural
+         (nombre, correo_electronico, password_hash, telefono, tipo_identificacion,
+          numero_identificacion, plan_servicio)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [nombre, correo, passwordHash, telefono || null, tipoIdentificacion || null,
+       numeroIdentificacion || null, plan],
+    );
+    const token = crearToken({
+      tipo: 'persona_natural',
+      id: resultado.insertId,
+      nombre,
+      correo,
+      rol: 'persona_natural',
+    });
+    return res.status(201).json({
+      token,
+      usuario: { id: resultado.insertId, nombre, correo, rol: 'persona_natural' },
+      mensaje: 'Solicitud registrada correctamente.',
+    });
+  } catch (error) {
+    if (error.errno === 1062) {
+      return res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' });
+    }
+    return reportarError(res, 'Error al registrar persona natural', error);
+  }
+});
+
+appMiddleware.post('/api/personas-naturales/login', async (req, res) => {
+  const correo = typeof req.body?.correo_electronico === 'string'
+    ? req.body.correo_electronico.trim().toLowerCase()
+    : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!correo || !password) {
+    return res.status(400).json({ error: 'Ingresa correo electrónico y contraseña.' });
+  }
+
+  try {
+    const [personas] = await pool.query(
+      `SELECT id_persona, nombre, correo_electronico, password_hash, activo
+         FROM cliente_persona_natural
+        WHERE correo_electronico = ?`,
+      [correo],
+    );
+    const persona = personas[0];
+    if (!persona || !persona.activo ||
+        !(await bcrypt.compare(password, persona.password_hash))) {
+      return res.status(401).json({ error: 'Credenciales incorrectas o cuenta inactiva.' });
+    }
+    const token = crearToken({
+      tipo: 'persona_natural',
+      id: persona.id_persona,
+      nombre: persona.nombre,
+      correo: persona.correo_electronico,
+      rol: 'persona_natural',
+    });
+    return res.json({
+      token,
+      usuario: { id: persona.id_persona, nombre: persona.nombre, correo: persona.correo_electronico, rol: 'persona_natural' },
+    });
+  } catch (error) {
+    return reportarError(res, 'Error al iniciar sesión de persona natural', error);
+  }
+});
+
+appMiddleware.get('/api/usuarios', requerirRoles('administrador'), async (req, res) => {
+  try {
+    const [usuarios] = await pool.query(
+      `SELECT id_usuario, nombre, email, rol, activo, ultimo_acceso, fecha_creacion
+         FROM usuario_sistema
+        ORDER BY nombre`,
+    );
+    res.json(usuarios);
+  } catch (error) {
+    reportarError(res, 'Error al consultar usuarios', error);
+  }
+});
+
+appMiddleware.post('/api/usuarios', requerirRoles('administrador'), async (req, res) => {
+  const nombre = typeof req.body?.nombre === 'string' ? req.body.nombre.trim() : '';
+  const correo = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const rol = typeof req.body?.rol === 'string' ? req.body.rol : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!nombre || nombre.length > 100) {
+    return res.status(400).json({ error: 'El nombre es obligatorio y debe tener máximo 100 caracteres.' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo) || correo.length > 150) {
+    return res.status(400).json({ error: 'El correo no es válido.' });
+  }
+  if (!['administrador', 'vendedor', 'invitado'].includes(rol)) {
+    return res.status(400).json({ error: 'El rol debe ser administrador, vendedor o invitado.' });
+  }
+  if (!password || password.length < 8 || password.length > 72) {
+    return res.status(400).json({ error: 'La contraseña debe tener entre 8 y 72 caracteres.' });
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 12);
+    const [resultado] = await pool.query(
+      `INSERT INTO usuario_sistema (nombre, email, password_hash, rol, activo)
+       VALUES (?, ?, ?, ?, TRUE)`,
+      [nombre, correo, passwordHash, rol],
+    );
+    res.status(201).json({ id_usuario: resultado.insertId, nombre, email: correo, rol, activo: true });
+  } catch (error) {
+    if (error.errno === 1062) {
+      return res.status(409).json({ error: 'Ya existe un usuario con ese correo.' });
+    }
+    reportarError(res, 'Error al crear usuario', error);
+  }
+});
+
+appMiddleware.patch('/api/usuarios/:id', requerirRoles('administrador'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!idPositivo(id)) return res.status(400).json({ error: 'El ID de usuario no es válido.' });
+  const rolValido = req.body?.rol == null || ['administrador', 'vendedor', 'invitado'].includes(req.body.rol);
+  if (!rolValido) return res.status(400).json({ error: 'El rol no es válido.' });
+
+  try {
+    const campos = [];
+    const valores = [];
+    if (req.body?.rol != null) {
+      campos.push('rol = ?');
+      valores.push(req.body.rol);
+    }
+    if (typeof req.body?.activo === 'boolean') {
+      campos.push('activo = ?');
+      valores.push(req.body.activo);
+    }
+    if (typeof req.body?.password === 'string' && req.body.password) {
+      if (req.body.password.length < 8 || req.body.password.length > 72) {
+        return res.status(400).json({ error: 'La contraseña debe tener entre 8 y 72 caracteres.' });
+      }
+      campos.push('password_hash = ?');
+      valores.push(await bcrypt.hash(req.body.password, 12));
+    }
+    if (!campos.length) return res.status(400).json({ error: 'No hay cambios para aplicar.' });
+    valores.push(id);
+    const [resultado] = await pool.query(
+      `UPDATE usuario_sistema SET ${campos.join(', ')} WHERE id_usuario = ?`,
+      valores,
+    );
+    if (!resultado.affectedRows) return res.status(404).json({ error: 'El usuario no existe.' });
+    res.json({ id_usuario: id, actualizado: true });
+  } catch (error) {
+    reportarError(res, 'Error al actualizar usuario', error);
+  }
+});
 
 appMiddleware.get('/api/health', async (req, res) => {
   try {
@@ -882,6 +1176,27 @@ appMiddleware.use((error, req, res, next) => {
 
 const server = appMiddleware.listen(port, async () => {
   try {
+    if (adminInicialEmail && adminInicialPassword) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminInicialEmail)) {
+        throw new Error('ADMIN_INITIAL_EMAIL no es válido.');
+      }
+      if (adminInicialPassword.length < 8) {
+        throw new Error('ADMIN_INITIAL_PASSWORD debe tener al menos 8 caracteres.');
+      }
+      const passwordHash = await bcrypt.hash(adminInicialPassword, 12);
+      await pool.query(
+        `INSERT INTO usuario_sistema
+           (nombre, email, password_hash, rol, activo)
+         VALUES (?, ?, ?, 'administrador', TRUE)
+         ON DUPLICATE KEY UPDATE
+           nombre = VALUES(nombre),
+           password_hash = VALUES(password_hash),
+           rol = 'administrador',
+           activo = TRUE`,
+        [adminInicialNombre, adminInicialEmail, passwordHash],
+      );
+      console.log(`Administrador inicial disponible: ${adminInicialEmail}`);
+    }
     await pool.query('SELECT 1');
     console.log(`API de Zimbra disponible en http://localhost:${port}`);
     console.log(`Conectada a MySQL (Aiven): ${databaseConfig.database} en ${databaseConfig.host}:${databaseConfig.port}`);
