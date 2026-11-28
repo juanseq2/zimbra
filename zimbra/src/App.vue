@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import ProspectosPanel from './components/ProspectosPanel.vue'
 import AuthPage from './components/AuthPage.vue'
 import AdminUsersPanel from './components/AdminUsersPanel.vue'
+import PersonaSolicitudPanel from './components/PersonaSolicitudPanel.vue'
 
 interface UsuarioSesion {
   id: number
@@ -204,28 +205,19 @@ onMounted(() => {
       localStorage.removeItem('zimbraSesion')
     }
   }
-  if (token.value) cargarDatos()
+  if (token.value && usuario.value?.rol !== 'persona_natural') cargarDatos()
 })
 </script>
 
 <template>
   <AuthPage v-if="!usuario" :api-url="apiUrl" @autenticado="iniciarSesion" />
 
-  <main v-else-if="usuario.rol === 'persona_natural'" class="dashboard persona-shell">
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">ZIMBRA · CUENTA PERSONAL</p>
-        <h1>Solicitud de servicio</h1>
-        <p class="page-description">Hola, {{ usuario.nombre }}. Tu solicitud fue registrada.</p>
-      </div>
-      <button class="refresh-button" type="button" @click="cerrarSesion">Cerrar sesión</button>
-    </header>
-    <section class="panel persona-status">
-      <h2>Tu cuenta está creada</h2>
-      <p>Un asesor comercial podrá revisar tu solicitud y ponerse en contacto contigo.</p>
-      <p><strong>Correo:</strong> {{ usuario.correo }}</p>
-    </section>
-  </main>
+  <PersonaSolicitudPanel
+    v-else-if="usuario.rol === 'persona_natural'"
+    :api-url="apiUrl"
+    :token="token"
+    @cerrar-sesion="cerrarSesion"
+  />
 
   <main v-else class="dashboard">
     <header class="page-header">
@@ -542,10 +534,6 @@ button {
   background: #fff;
   color: #536078;
   cursor: pointer;
-}
-
-.persona-status {
-  padding: 24px;
 }
 
 .eyebrow {

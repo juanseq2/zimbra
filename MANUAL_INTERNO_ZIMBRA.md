@@ -11,6 +11,8 @@ Existen dos tipos de sesión:
 
 Los administradores crean usuarios internos mediante `POST /api/usuarios`. Las personas naturales se registran sin acceso al panel comercial mediante `POST /api/personas-naturales/registro`.
 
+El registro personal crea, dentro de una transacción, la cuenta, un prospecto comercial o lo vincula con uno existente con el mismo correo. También guarda compañía, plan solicitado y un primer evento de historial.
+
 ## 1. Resumen
 
 Zimbra es una aplicación de demostración comercial compuesta por:
@@ -28,6 +30,7 @@ El frontend consume la API mediante un prefijo `/api`. En desarrollo, Vite actú
 zimbra/
   src/App.vue                         Panel principal
   src/components/ProspectosPanel.vue  Gestión comercial
+  src/components/PersonaSolicitudPanel.vue Seguimiento de persona natural
   server/index.js                     Implementación Express alternativa/antigua
   vite.config.ts                      Proxy y configuración Vite
 zimbra-api/
@@ -36,6 +39,8 @@ zimbra-api/
 database/
   zimbra-mysql.sql                    Esquema completo
   migracion-funcional-mysql.sql       Migración aditiva
+  autenticacion-usuarios-mysql.sql    Usuarios y cuentas personales
+  seguimiento-personas-naturales-mysql.sql  Prospecto vinculado e historial
   indices-mysql.sql                   Índices auxiliares
   consultas-mysql.sql                 Diagnósticos y consultas
   roles-permisos-mysql.sql            Roles MySQL sugeridos
@@ -133,6 +138,10 @@ Estados: `pendiente`, `procesando`, `sincronizado`, `error`.
 
 Aviso interno asociado a un usuario y opcionalmente a un cliente.
 
+### `cliente_persona_natural` y `persona_natural_historial`
+
+La cuenta personal incluye compañía, plan solicitado, estado de servicio y la referencia al prospecto. El historial conserva cada actualización del proceso, su nota, fecha y usuario interno que la registró.
+
 ## 5. Vistas y procedimientos
 
 ### `v_tasa_conversion`
@@ -177,6 +186,8 @@ La API valida nombre, correo, empresa, campaña e identificador de visitante. De
 6. Actualiza el puntaje.
 7. Intenta asignación automática.
 8. Confirma la transacción.
+
+El registro de una persona natural sigue también una transacción: inserta la cuenta, crea o reutiliza el prospecto del mismo correo, actualiza el vínculo, y guarda el primer estado del proceso. Un administrador puede actualizar la etapa y añadir notas; la cuenta personal consulta su propio historial.
 
 La duplicación de correo genera un error 409. Una campaña inválida genera un error 400 o 1452 según la operación y la restricción.
 
@@ -265,6 +276,15 @@ Sin webhook configurado no se simula sincronización; los eventos permanecen pen
 | Método | Ruta | Función |
 |---|---|---|
 | GET | `/api/health` | Verifica base de datos |
+| POST | `/api/auth/login` | Inicia sesión interna |
+| POST | `/api/personas-naturales/registro` | Registra cuenta y prospecto |
+| POST | `/api/personas-naturales/login` | Inicia sesión personal |
+| GET | `/api/personas-naturales/mi-solicitud` | Estado e historial propios |
+| GET | `/api/admin/personas-naturales` | Lista solicitudes (administrador) |
+| POST | `/api/admin/personas-naturales` | Crea solicitud y prospecto |
+| PATCH | `/api/admin/personas-naturales/:id` | Edita datos y registra seguimiento |
+| DELETE | `/api/admin/personas-naturales/:id` | Archiva, no elimina el prospecto |
+| GET | `/api/admin/personas-naturales/:id/historial` | Historial completo (administrador) |
 | GET | `/api/configuracion` | Devuelve umbral y límite |
 | GET | `/api/campanias` | Lista campañas |
 | GET | `/api/vendedores` | Lista vendedores activos y carga |
@@ -358,7 +378,10 @@ No publique el sistema hasta incorporar autenticación, autorización, HTTPS y g
 
 - Base nueva: ejecutar `zimbra-mysql.sql`.
 - Base existente: ejecutar una vez `migracion-funcional-mysql.sql`.
-- Nunca ejecutar ambos scripts consecutivamente.
+- Nunca ejecutar el script de esquema nuevo y la migración funcional consecutivamente.
+- Ejecutar `autenticacion-usuarios-mysql.sql` para añadir login y cuentas personales.
+- Ejecutar después `seguimiento-personas-naturales-mysql.sql` para relacionar cuentas con prospectos e historial.
+- Ejecutar `roles-permisos-mysql.sql` después de que existan todas las tablas.
 - Hacer respaldo antes de migrar.
 - Después ejecutar `indices-mysql.sql` si hace falta.
 

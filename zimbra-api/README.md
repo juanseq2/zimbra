@@ -10,10 +10,16 @@ anónima, notificaciones, facturas internas y la cola CRM; también reemplaza
 `sp_cerrar_venta` para crear la factura y el evento CRM dentro de la misma
 transacción.
 
-Para una instalación nueva, usa `database\zimbra-mysql.sql`. No ejecutes ambos
-scripts seguidos. Luego configura los permisos de la cuenta dedicada con
-`database\roles-permisos-mysql.sql` (ajusta `defaultdb` si `DB_NAME` es distinto).
-No compartas ni subas credenciales.
+Para una instalación nueva, usa `database\zimbra-mysql.sql`; no ejecutes ese
+script después de la migración funcional.
+
+Para autenticación y cuentas de persona natural, ejecuta una vez
+`database\autenticacion-usuarios-mysql.sql`; para enlazar las solicitudes al
+embudo comercial y habilitar el historial, ejecuta después
+`database\seguimiento-personas-naturales-mysql.sql`. En una base existente que ya
+tenga autenticación, aplica solo la segunda migración. Después configura los
+permisos de la cuenta dedicada con `database\roles-permisos-mysql.sql` (ajusta
+`defaultdb` si `DB_NAME` es distinto). No compartas ni subas credenciales.
 
 La migración no se ejecuta al arrancar la API y no borra filas. La tabla de
 facturas contiene comprobantes internos del sistema; no sustituye una factura
@@ -37,6 +43,10 @@ juntos, desde `zimbra\` ejecuta `npm run dev:all`.
 
 - Registra prospectos con una prueba de 60 días, validación de correo y captura
   de IP en el registro.
+- El registro de persona natural crea también un prospecto, pide compañía y
+  permite consultar el estado y las notas del proceso desde su cuenta.
+- El administrador puede crear, consultar, actualizar y archivar solicitudes
+  personales; archivar desactiva la cuenta y conserva el historial y prospecto.
 - Registra navegación anónima mediante un identificador temporal de sesión del
   navegador; al registrarse el prospecto, asocia esos eventos. Los eventos
   anónimos no asociados se conservan en la base; elimínalos solo con una política
@@ -73,9 +83,11 @@ repositorio.
 
 ## Uso seguro
 
-La aplicación todavía no tiene autenticación de usuarios. Úsala solo en el
-entorno local/de demostración; no publiques la API ni el panel en Internet hasta
-añadir autenticación y autorización por rol. CORS no reemplaza autenticación.
+La aplicación tiene login con JWT y acciones administrativas limitadas al rol
+administrador, pero todavía requiere una revisión de seguridad para producción.
+No publiques la API ni el panel en Internet sin usar un `JWT_SECRET` privado,
+HTTPS, controles de acceso completos y protección de secretos. CORS no reemplaza
+autenticación.
 
 ## Concurrencia y sustentación
 

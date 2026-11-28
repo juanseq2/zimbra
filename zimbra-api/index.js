@@ -118,6 +118,11 @@ appMiddleware.use('/api', (req, res, next) => {
   try {
     const usuario = jwt.verify(token, jwtSecret, { issuer: 'zimbra-api' });
     if (usuario.tipo === 'persona_natural') {
+      if (req.method === 'GET' &&
+          ['/personas-naturales/mi-solicitud', '/api/personas-naturales/mi-solicitud'].includes(req.path)) {
+        req.usuario = usuario;
+        return next();
+      }
       return res.status(403).json({ error: 'El acceso de persona natural no incluye el panel administrativo.' });
     }
     if (!['administrador', 'vendedor', 'invitado'].includes(usuario.rol)) {
@@ -294,70 +299,368 @@ appMiddleware.get('/api/auth/me', autenticar, (req, res) => {
   res.json({ usuario: req.usuario });
 });
 
-appMiddleware.post('/api/personas-naturales/registro', async (req, res) => {
-  const nombre = typeof req.body?.nombre === 'string' ? req.body.nombre.trim() : '';
-  const correo = typeof req.body?.correo_electronico === 'string'
-    ? req.body.correo_electronico.trim().toLowerCase()
-    : '';
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  const telefono = typeof req.body?.telefono === 'string' ? req.body.telefono.trim() : '';
-  const tipoIdentificacion = typeof req.body?.tipo_identificacion === 'string'
-    ? req.body.tipo_identificacion.trim()
-    : '';
-  const numeroIdentificacion = typeof req.body?.numero_identificacion === 'string'
-    ? req.body.numero_identificacion.trim()
-    : '';
-  const plan = typeof req.body?.plan_servicio === 'string' ? req.body.plan_servicio.trim() : '';
+const validarSolicitudPersona = (body) => {
+  const solicitud = {
+    nombre: typeof body?.nombre === 'string' ? body.nombre.trim() : '',
+    correo: typeof body?.correo_electronico === 'string'
+      ? body.correo_electronico.trim().toLowerCase()
+      : '',
+    password: typeof body?.password === 'string' ? body.password : '',
+    empresa: typeof body?.empresa === 'string' ? body.empresa.trim() : '',
+    telefono: typeof body?.telefono === 'string' ? body.telefono.trim() : '',
+    tipoIdentificacion: typeof body?.tipo_identificacion === 'string'
+      ? body.tipo_identificacion.trim()
+      : '',
+    numeroIdentificacion: typeof body?.numero_identificacion === 'string'
+      ? body.numero_identificacion.trim()
+      : '',
+    plan: typeof body?.plan_servicio === 'string' ? body.plan_servicio.trim() : '',
+  };
+  if (!solicitud.nombre || solicitud.nombre.length > 120) {
+    return { error: 'El nombre es obligatorio y debe tener máximo 120 caracteres.' };
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(solicitud.correo) || solicitud.correo.length > 150) {
+    return { error: 'Ingresa un correo electrónico válido.' };
+  }
+  if (!solicitud.password || solicitud.password.length < 8 || solicitud.password.length > 72) {
+    return { error: 'La contraseña debe tener entre 8 y 72 caracteres.' };
+  }
+  if (!solicitud.empresa || solicitud.empresa.length > 120) {
+    return { error: 'La compañía es obligatoria y debe tener máximo 120 caracteres.' };
+  }
+  if (solicitud.telefono.length > 30) {
+    return { error: 'El teléfono debe tener máximo 30 caracteres.' };
+  }
+  if (solicitud.tipoIdentificacion &&
+      !['CC', 'CE', 'Pasaporte', 'Otro'].includes(solicitud.tipoIdentificacion)) {
+    return { error: 'El tipo de identificación no es válido.' };
+  }
+  if (solicitud.numeroIdentificacion.length > 30) {
+    return { error: 'El número de identificación debe tener máximo 30 caracteres.' };
+  }
+  if (!solicitud.plan || solicitud.plan.length > 80) {
+    return { error: 'Selecciona el servicio que deseas adquirir.' };
+  }
+  return { solicitud };
+};
 
-  if (!nombre || nombre.length > 120) {
-    return res.status(400).json({ error: 'El nombre es obligatorio y debe tener máximo 120 caracteres.' });
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo) || correo.length > 150) {
-    return res.status(400).json({ error: 'Ingresa un correo electrónico válido.' });
-  }
-  if (!password || password.length < 8 || password.length > 72) {
-    return res.status(400).json({ error: 'La contraseña debe tener entre 8 y 72 caracteres.' });
-  }
-  if (telefono.length > 30) {
-    return res.status(400).json({ error: 'El teléfono debe tener máximo 30 caracteres.' });
-  }
-  if (tipoIdentificacion && !['CC', 'CE', 'Pasaporte', 'Otro'].includes(tipoIdentificacion)) {
-    return res.status(400).json({ error: 'El tipo de identificación no es válido.' });
-  }
-  if (numeroIdentificacion.length > 30) {
-    return res.status(400).json({ error: 'El número de identificación debe tener máximo 30 caracteres.' });
-  }
-  if (!plan || plan.length > 80) {
-    return res.status(400).json({ error: 'Selecciona el servicio que deseas adquirir.' });
-  }
+const crearSolicitudPersona = async (solicitud, creadoPor = null, ipOrigen = null) => {
+  const passwordHash = await bcrypt.hash(solicitud.password, 12);
+  return ejecutarTransaccion(async (connection) => {
+    const [insertPersona] = await connection.query(
+      `INSERT INTO cliente_persona_natural
+         (nombre, empresa, correo_electronico, password_hash, telefono, tipo_identificacion,
+          numero_identificacion, plan_servicio)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        solicitud.nombre,
+        solicitud.empresa,
+        solicitud.correo,
+        passwordHash,
+        solicitud.telefono || null,
+        solicitud.tipoIdentificacion || null,
+        solicitud.numeroIdentificacion || null,
+        solicitud.plan,
+      ],
+    );
+    const idPersona = insertPersona.insertId;
+    const [prospectos] = await connection.query(
+      `SELECT id_cliente
+         FROM cliente_prospecto
+        WHERE correo_electronico = ?
+        FOR UPDATE`,
+      [solicitud.correo],
+    );
+
+    let idCliente;
+    if (prospectos.length) {
+      idCliente = prospectos[0].id_cliente;
+      await connection.query(
+        `UPDATE cliente_prospecto
+            SET empresa = ?
+          WHERE id_cliente = ?`,
+        [solicitud.empresa, idCliente],
+      );
+    } else {
+      const [insertProspecto] = await connection.query(
+        `INSERT INTO cliente_prospecto
+           (correo_electronico, nombre, empresa, estado_prospecto, duracion_prueba_dias)
+         VALUES (?, ?, ?, 'nuevo', 60)`,
+        [solicitud.correo, solicitud.nombre, solicitud.empresa],
+      );
+      idCliente = insertProspecto.insertId;
+      await connection.query(
+        `INSERT INTO actividad_web (id_cliente, url_visitada, tipo_evento, ip_origen)
+         VALUES (?, '/solicitud-servicio', 'registro_prueba', ?)`,
+        [idCliente, ipOrigen],
+      );
+      const puntaje = await calcularPuntaje(connection, idCliente);
+      await connection.query(
+        'UPDATE cliente_prospecto SET puntaje_interes = ? WHERE id_cliente = ?',
+        [puntaje, idCliente],
+      );
+      await encolarEventoCrm(connection, 'prospecto.creado', {
+        id_cliente: idCliente,
+        nombre: solicitud.nombre,
+        correo_electronico: solicitud.correo,
+        empresa: solicitud.empresa,
+        origen: 'persona_natural',
+        plan_servicio: solicitud.plan,
+      });
+    }
+
+    await connection.query(
+      'UPDATE cliente_persona_natural SET id_cliente_prospecto = ? WHERE id_persona = ?',
+      [idCliente, idPersona],
+    );
+    await connection.query(
+      `INSERT INTO persona_natural_historial (id_persona, estado, detalle, id_usuario)
+       VALUES (?, 'pendiente', ?, ?)`,
+      [idPersona, `Solicitud recibida para el servicio: ${solicitud.plan}.`, creadoPor],
+    );
+    return { id_persona: idPersona, id_cliente: idCliente };
+  });
+};
+
+appMiddleware.post('/api/personas-naturales/registro', async (req, res) => {
+  const validacion = validarSolicitudPersona(req.body);
+  if (validacion.error) return res.status(400).json({ error: validacion.error });
 
   try {
-    const passwordHash = await bcrypt.hash(password, 12);
-    const [resultado] = await pool.query(
-      `INSERT INTO cliente_persona_natural
-         (nombre, correo_electronico, password_hash, telefono, tipo_identificacion,
-          numero_identificacion, plan_servicio)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [nombre, correo, passwordHash, telefono || null, tipoIdentificacion || null,
-       numeroIdentificacion || null, plan],
-    );
+    const resultado = await crearSolicitudPersona(validacion.solicitud, null, req.ip || null);
     const token = crearToken({
       tipo: 'persona_natural',
-      id: resultado.insertId,
-      nombre,
-      correo,
+      id: resultado.id_persona,
+      nombre: validacion.solicitud.nombre,
+      correo: validacion.solicitud.correo,
       rol: 'persona_natural',
     });
     return res.status(201).json({
       token,
-      usuario: { id: resultado.insertId, nombre, correo, rol: 'persona_natural' },
-      mensaje: 'Solicitud registrada correctamente.',
+      usuario: {
+        id: resultado.id_persona,
+        nombre: validacion.solicitud.nombre,
+        correo: validacion.solicitud.correo,
+        rol: 'persona_natural',
+      },
+      mensaje: 'Solicitud registrada como prospecto. Puedes consultar su avance desde tu cuenta.',
     });
   } catch (error) {
     if (error.errno === 1062) {
       return res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' });
     }
     return reportarError(res, 'Error al registrar persona natural', error);
+  }
+});
+
+appMiddleware.get('/api/personas-naturales/mi-solicitud', autenticar, async (req, res) => {
+  if (req.usuario.tipo !== 'persona_natural') {
+    return res.status(403).json({ error: 'Esta consulta es exclusiva para personas naturales.' });
+  }
+  try {
+    const [[solicitud]] = await pool.query(
+      `SELECT p.id_persona, p.nombre, p.empresa, p.correo_electronico, p.telefono,
+              p.plan_servicio, p.estado_solicitud, p.fecha_registro,
+              cp.id_cliente, cp.estado_prospecto, cp.puntaje_interes,
+              cp.id_usuario_asignado, u.nombre AS vendedor
+         FROM cliente_persona_natural AS p
+         LEFT JOIN cliente_prospecto AS cp ON cp.id_cliente = p.id_cliente_prospecto
+         LEFT JOIN usuario_sistema AS u ON u.id_usuario = cp.id_usuario_asignado
+        WHERE p.id_persona = ? AND p.activo = TRUE`,
+      [req.usuario.id],
+    );
+    if (!solicitud) return res.status(404).json({ error: 'No se encontró una solicitud activa.' });
+    const [historial] = await pool.query(
+      `SELECT estado, detalle, creado_en
+         FROM persona_natural_historial
+        WHERE id_persona = ?
+        ORDER BY creado_en DESC, id_historial DESC`,
+      [req.usuario.id],
+    );
+    res.json({ solicitud, historial });
+  } catch (error) {
+    reportarError(res, 'Error al consultar avance de solicitud', error);
+  }
+});
+
+appMiddleware.get('/api/admin/personas-naturales', requerirRoles('administrador'), async (req, res) => {
+  try {
+    const [solicitudes] = await pool.query(
+      `SELECT p.id_persona, p.nombre, p.empresa, p.correo_electronico, p.telefono,
+              p.tipo_identificacion, p.numero_identificacion, p.plan_servicio,
+              p.estado_solicitud, p.activo, p.fecha_registro, p.id_cliente_prospecto,
+              cp.estado_prospecto, cp.puntaje_interes, u.nombre AS vendedor
+         FROM cliente_persona_natural AS p
+         LEFT JOIN cliente_prospecto AS cp ON cp.id_cliente = p.id_cliente_prospecto
+         LEFT JOIN usuario_sistema AS u ON u.id_usuario = cp.id_usuario_asignado
+        ORDER BY p.fecha_registro DESC`,
+    );
+    res.json(solicitudes);
+  } catch (error) {
+    reportarError(res, 'Error al consultar solicitudes de personas naturales', error);
+  }
+});
+
+appMiddleware.get('/api/admin/personas-naturales/:id/historial', requerirRoles('administrador'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!idPositivo(id)) return res.status(400).json({ error: 'El ID de solicitud no es válido.' });
+  try {
+    const [historial] = await pool.query(
+      `SELECT h.estado, h.detalle, h.creado_en, u.nombre AS usuario
+         FROM persona_natural_historial AS h
+         LEFT JOIN usuario_sistema AS u ON u.id_usuario = h.id_usuario
+        WHERE h.id_persona = ?
+        ORDER BY h.creado_en DESC, h.id_historial DESC`,
+      [id],
+    );
+    res.json(historial);
+  } catch (error) {
+    reportarError(res, 'Error al consultar historial de solicitud', error);
+  }
+});
+
+appMiddleware.post('/api/admin/personas-naturales', requerirRoles('administrador'), async (req, res) => {
+  const validacion = validarSolicitudPersona(req.body);
+  if (validacion.error) return res.status(400).json({ error: validacion.error });
+  try {
+    const resultado = await crearSolicitudPersona(validacion.solicitud, req.usuario.id, req.ip || null);
+    res.status(201).json(resultado);
+  } catch (error) {
+    if (error.errno === 1062) {
+      return res.status(409).json({ error: 'Ya existe una cuenta o prospecto con ese correo.' });
+    }
+    reportarError(res, 'Error al crear solicitud de persona natural', error);
+  }
+});
+
+appMiddleware.patch('/api/admin/personas-naturales/:id', requerirRoles('administrador'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!idPositivo(id)) return res.status(400).json({ error: 'El ID de solicitud no es válido.' });
+  const estadosValidos = new Set([
+    'pendiente', 'en_revision', 'contactada', 'propuesta_enviada',
+    'pendiente_pago', 'activada', 'rechazada', 'archivada',
+  ]);
+  const estado = req.body?.estado_solicitud;
+  if (estado != null && !estadosValidos.has(estado)) {
+    return res.status(400).json({ error: 'El estado seleccionado no es válido.' });
+  }
+
+  try {
+    await ejecutarTransaccion(async (connection) => {
+      const [personas] = await connection.query(
+        'SELECT id_persona, id_cliente_prospecto, estado_solicitud FROM cliente_persona_natural WHERE id_persona = ? FOR UPDATE',
+        [id],
+      );
+      if (!personas.length) {
+        const error = new Error('La solicitud no existe.');
+        error.status = 404;
+        throw error;
+      }
+      const persona = personas[0];
+      const campos = [];
+      const valores = [];
+      const actualizarCampo = (clave, columna, maximo, obligatorio = false) => {
+        if (req.body?.[clave] === undefined) return null;
+        const valor = typeof req.body[clave] === 'string' ? req.body[clave].trim() : '';
+        if ((obligatorio && !valor) || valor.length > maximo) {
+          return `${columna} es obligatorio y debe tener máximo ${maximo} caracteres.`;
+        }
+        campos.push(`${columna} = ?`);
+        valores.push(valor || null);
+        return null;
+      };
+      for (const [clave, columna, maximo, obligatorio] of [
+        ['nombre', 'nombre', 120, true],
+        ['empresa', 'empresa', 120, true],
+        ['telefono', 'telefono', 30, false],
+        ['plan_servicio', 'plan_servicio', 80, true],
+      ]) {
+        const error = actualizarCampo(clave, columna, maximo, obligatorio);
+        if (error) {
+          const validationError = new Error(error);
+          validationError.status = 400;
+          throw validationError;
+        }
+      }
+      if (typeof req.body?.activo === 'boolean') {
+        campos.push('activo = ?');
+        valores.push(req.body.activo);
+      }
+      if (estado != null) {
+        campos.push('estado_solicitud = ?');
+        valores.push(estado);
+      }
+      if (campos.length) {
+        valores.push(id);
+        await connection.query(
+          `UPDATE cliente_persona_natural SET ${campos.join(', ')} WHERE id_persona = ?`,
+          valores,
+        );
+      }
+      const nombre = req.body?.nombre?.trim();
+      const empresa = req.body?.empresa?.trim();
+      if (persona.id_cliente_prospecto && (nombre || empresa)) {
+        const leadCampos = [];
+        const leadValores = [];
+        if (nombre) {
+          leadCampos.push('nombre = ?');
+          leadValores.push(nombre);
+        }
+        if (empresa) {
+          leadCampos.push('empresa = ?');
+          leadValores.push(empresa);
+        }
+        leadValores.push(persona.id_cliente_prospecto);
+        await connection.query(
+          `UPDATE cliente_prospecto SET ${leadCampos.join(', ')} WHERE id_cliente = ?`,
+          leadValores,
+        );
+      }
+      const nuevoEstado = estado || persona.estado_solicitud;
+      const detalle = typeof req.body?.detalle === 'string' ? req.body.detalle.trim() : '';
+      if ((estado && estado !== persona.estado_solicitud) || detalle) {
+        const texto = detalle || `La solicitud cambió de estado a ${nuevoEstado}.`;
+        await connection.query(
+          `INSERT INTO persona_natural_historial (id_persona, estado, detalle, id_usuario)
+           VALUES (?, ?, ?, ?)`,
+          [id, nuevoEstado, texto.slice(0, 500), req.usuario.id],
+        );
+      }
+    });
+    res.json({ id_persona: id, actualizado: true });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    reportarError(res, 'Error al actualizar solicitud de persona natural', error);
+  }
+});
+
+appMiddleware.delete('/api/admin/personas-naturales/:id', requerirRoles('administrador'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!idPositivo(id)) return res.status(400).json({ error: 'El ID de solicitud no es válido.' });
+  try {
+    const resultado = await ejecutarTransaccion(async (connection) => {
+      const [personas] = await connection.query(
+        'SELECT id_persona, estado_solicitud FROM cliente_persona_natural WHERE id_persona = ? FOR UPDATE',
+        [id],
+      );
+      if (!personas.length) return false;
+      await connection.query(
+        `UPDATE cliente_persona_natural
+            SET activo = FALSE, estado_solicitud = 'archivada'
+          WHERE id_persona = ?`,
+        [id],
+      );
+      await connection.query(
+        `INSERT INTO persona_natural_historial (id_persona, estado, detalle, id_usuario)
+         VALUES (?, 'archivada', 'Solicitud archivada por administración.', ?)`,
+        [id, req.usuario.id],
+      );
+      return true;
+    });
+    if (!resultado) return res.status(404).json({ error: 'La solicitud no existe.' });
+    res.json({ id_persona: id, archivada: true });
+  } catch (error) {
+    reportarError(res, 'Error al archivar solicitud de persona natural', error);
   }
 });
 

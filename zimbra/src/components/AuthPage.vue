@@ -22,6 +22,7 @@ const exito = ref('')
 const interno = ref({ correo_electronico: '', password: '' })
 const persona = ref({
   nombre: '',
+  empresa: '',
   correo_electronico: '',
   password: '',
   telefono: '',
@@ -126,6 +127,10 @@ const enviarPersona = async () => {
             <label>
               Nombre completo
               <input v-model.trim="persona.nombre" maxlength="120" autocomplete="name" required />
+            </label>
+            <label>
+              Compañía
+              <input v-model.trim="persona.empresa" maxlength="120" autocomplete="organization" required />
             </label>
           </template>
           <label>

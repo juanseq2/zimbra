@@ -9,6 +9,8 @@ La pantalla inicial ofrece dos opciones:
 
 Los usuarios internos deben obtener sus credenciales del administrador. Un administrador puede crear nuevas cuentas desde **Administración de usuarios**.
 
+Al registrarse como persona natural se solicita nombre, compañía, correo, contraseña y servicio. El registro crea la cuenta y, a la vez, un prospecto en el flujo comercial.
+
 ## 1. Propósito
 
 Zimbra es un panel administrativo para gestionar la captación y el seguimiento de prospectos. Permite registrar pruebas gratuitas, controlar el interés de cada prospecto, asignar vendedores, crear propuestas, cerrar ventas y consultar resultados comerciales.
@@ -23,7 +25,7 @@ El panel muestra también ventas cerradas, campañas, reportes mensuales y el es
 - Navegador moderno.
 - Credenciales de MySQL configuradas para la API.
 
-> Importante: el sistema actual no tiene autenticación ni permisos de usuario en la interfaz. Debe usarse únicamente en una red local o ambiente de demostración.
+> Importante: aunque hay inicio de sesión y control básico de roles, la aplicación todavía requiere una revisión de seguridad antes de exponerse en Internet.
 
 ## 3. Preparación del sistema
 
@@ -239,7 +241,17 @@ El contador superior indica cuántas notificaciones siguen sin leer.
 | Propuesta ya tiene venta | No puede modificarse. |
 | CRM pendiente | Configure `CRM_WEBHOOK_URL` o acepta que la cola no representa sincronización. |
 
-## 15. Seguridad y operación
+## 15. Seguimiento de solicitud como persona natural
+
+Después de iniciar sesión se puede consultar el estado del servicio, la compañía, el plan, el puntaje comercial, el asesor asignado y el historial de actualizaciones.
+
+Los estados pueden incluir: solicitud recibida, en revisión, contacto realizado, propuesta enviada, pendiente de pago, servicio activado o rechazada. El historial muestra las notas y fechas ingresadas por el equipo.
+
+## 16. Administración de solicitudes
+
+El administrador cuenta con una sección para crear, consultar y editar solicitudes de personas naturales, actualizar su estado y agregar una nota de seguimiento. **Archivar** es una baja lógica: desactiva el acceso a la cuenta, pero conserva el prospecto y su historial comercial. Las solicitudes archivadas pueden reactivarse.
+
+## 17. Seguridad y operación
 
 - No exponga el puerto de la API a Internet sin autenticación y autorización.
 - Use una cuenta MySQL dedicada y permisos mínimos.
